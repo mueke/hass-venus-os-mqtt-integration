@@ -1,0 +1,25 @@
+@startuml
+scale 600 width
+title "Multiplus 2 State Model"
+state on {
+}
+state inverter {
+}
+state charge {
+}
+state off {
+}
+off : this the off state
+on : On State means Passthrough Mode\nPower from the Grid
+inverter: Power is taken from Battery
+charge : Battery is charging from Grid
+on --> inverter : SOC > 70%
+on --> charge : SOC < 25%
+charge --> on : SOC > 50%
+inverter --> on : SOC < 40%
+inverter --> charge : manual
+inverter --> off : Error
+
+on --> off : Error
+charge --> off : Error
+@enduml
