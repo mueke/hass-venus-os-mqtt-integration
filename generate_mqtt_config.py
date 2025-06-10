@@ -4,7 +4,9 @@ import paho.mqtt.client as mqtt
 import time
 import yaml
 
-JSON_VALUE_FLOAT_ROUND_2 = "{{ value_json.value | float | round(2) }}"
+JSON_VALUE_FLOAT_ROUND_2 = "{{ value_json.value | float(0) | round(2) }}"
+
+JSON_VALUE_FLOAT_INCREASING = '{% if (value_json.value | float(0)) > 0 %}{{ value_json.value | float(0) | round(2) }}{% else %}{% endif %}'
 
 
 class ValueTemplate(str):
@@ -20,12 +22,25 @@ import sys
 import time
 import yaml
 import os
-from dotenv import load_dotenv
+import re
 
+mqttBridgePrefix = os.getenv("MQTT_PREFIX", "venus-home/")
+
+
+mqtt_server = os.getenv("MQTT_SERVER", "homeassistant.local")
+mqtt_port = os.getenv("MQTT_PORT", "1883")
+mqtt_user = os.getenv("MQTT_USER", "mqtt")
+mqtt_password = os.getenv("MQTT_PASSWORD", "") or exit("password missing")
+subscribe_topic = f"{mqttBridgePrefix}N/{os.getenv('VICTRON_ID')}/#"
+print("MQTT_BRIDGE_PREFIX: " + mqttBridgePrefix)
+print("SUBSCRIBE_TOPIC: " + subscribe_topic)
+print("MQTT_SERVER: " + mqtt_server)
+print("MQTT_PORT: " + mqtt_port)
+print("MQTT_USER: " + mqtt_user)
+print("MQTT_PASSWORD: " + mqtt_password)
 
 mqttc = mqtt.Client()
-mqttc.connect( os.getenv("MQTT_SERVER", "localhost"), int(os.getenv("MQTT_PORT","1883")), 60)
-mqttc.subscribe(f"N/{os.getenv('VICTRON_ID')}/#", 0)
+mqttc.username_pw_set(mqtt_user, mqtt_password)
 
 entity_id = lambda entity: entity.get('name').replace(" ", "_").lower()
 collected_config = {}
@@ -67,7 +82,7 @@ def gen_mqtt_config():
         mqtt = { "sensor" :  sensors,
                  "select" : selects
                }
-        yaml_list = yaml.dump(mqtt, default_flow_style=False)
+        yaml_list = yaml.dump(mqtt, default_flow_style=False, width=300)
         print(yaml_list)
         with open('hass_mqtt.yaml', 'w+') as f:
             f.write(yaml_list)
@@ -116,7 +131,8 @@ with open("attributes.csv", "r") as f:
 attr = {}
 duplicates = {}
 for line in attr_lines:
-
+    if( re.match('^[#|//].*',line) or re.match("^\W+$",line) ):
+        continue
     splitted = line.split(",")
     if len(splitted) == 8:
         pkg,path,unit1,unit2,id,ctype,scale,readOnly = splitted
@@ -124,7 +140,7 @@ for line in attr_lines:
         pkg, path, unit1, unit2, id, ctype, scale, readOnly, comment = splitted
     key = f"{pkg.split('.')[-1]}{path}"
     if key in attr:
-        print(f"Duplicate key: {key}")
+        #print(f"Duplicate key: {key}")
         firstData = attr[key]
         secondData = {"package:":pkg,"path":path,"unit1": unit1, "unit2": unit2, "id": id, "ctype": ctype, "scale": scale, "readOnly": readOnly=="R", "writeable": readOnly=="W"}
         diff = [x for x in firstData if x in secondData and firstData[x] != secondData[x]]
@@ -132,8 +148,8 @@ for line in attr_lines:
     else:
         attr[key] = {"package:":pkg,"path":path,"unit1": unit1, "unit2": unit2, "id": id, "ctype": ctype, "scale": scale, "readOnly": readOnly=="R", "writeable": readOnly=="W"}
     #print("pkg: " + pkg + " path: " + path + " unit1: " + unit1 + " unit2: " + unit2 + " id: " + id + " ctype: " + ctype + " scale: " + scale + " readOnly: " + readOnly)
-    if len(duplicates)>0:
-        print(duplicates)
+    #if len(duplicates)>0:
+        #print(duplicates)
         #exit(1) if [x for x in duplicates if len(duplicates[x][2])>0] else print("No differences in duplicates")
 print(len(attr.keys()))
 
@@ -157,27 +173,33 @@ def value_else_end_template():
 
 
 def on_message(mosq, obj, msg):
-    #print("Topic: " + msg.topic + "Message: " + str(msg.payload))
+    print("Topic: " + msg.topic )# + "Message: " + str(msg.payload))
     global last_found
 
     print(f"Topic: {msg.topic}")
     topic = msg.topic.split("/")
-    if len(topic) <= 3:
+    indexOfN = topic.index("N")
+    print(f"Index of N: {indexOfN}")
+    if len(topic) <= (3+indexOfN):
         return
-    pkg = topic[2]
-    deviceId = topic[3]
-    path = '/'.join(topic[4:])
+    pkg = topic[2+indexOfN]
+    deviceId = topic[3+indexOfN]
+    path = '/'.join(topic[(4+indexOfN):])
     key = f"{pkg}/{deviceId}/{path}"
     conf_key = f"{pkg}/{path}"
     conf = attr.get(conf_key)
-    print(f"Pkg: {pkg}, DeviceId: {deviceId}, Path: {path}, Key: {key}, ConfKey: {conf_key}, Conf: {conf}, Payload: {msg.payload}")
+    print(f"Pkg: {pkg}, DeviceId: {deviceId}, Path: {path}, Key: {key}, ConfKey: {conf_key}, Conf: {conf}") #, Payload: {msg.payload}")
     last_msg = time.time()
     if conf is not None and key not in collected_config and key not in changeable_select_fields :
         print( f"Adding {pkg}/{path}, Payload: {msg.payload}, Unit1: {conf['unit1']}, Unit2: {conf['unit2']}, Id: {conf['id']}, Ctype: {conf['ctype']}, Scale: {conf['scale']},ReadOnly: {conf['readOnly']}" )
         last_found = time.time()
         name = f'{str(pkg).capitalize()} {path.replace("/"," ")} {deviceId}'
-        state_topic = f'venus-home/{msg.topic}'
-        unique_id = f'{msg.topic.replace("/","_")}'
+        unique_id = '_'.join(topic[indexOfN:])
+        if not msg.topic.startswith( mqttBridgePrefix ):  
+            state_topic =  f'{mqttBridgePrefix}{msg.topic}'
+        else:
+            state_topic =  msg.topic
+        
         sensor_data = {
             'state_topic': state_topic,
             'name': name,
@@ -218,7 +240,7 @@ def on_message(mosq, obj, msg):
         if conf.get('unit2') == "kWh":
             sensor_data['device_class'] = 'energy'
             sensor_data['unit_of_measurement'] =  "kWh"
-            sensor_data['value_template'] = JSON_VALUE_FLOAT_ROUND_2
+            sensor_data['value_template'] = JSON_VALUE_FLOAT_INCREASING
             sensor_data['state_class'] = 'total_increasing'
             collected_config[key] = sensor_data
 
@@ -271,9 +293,13 @@ def on_message(mosq, obj, msg):
     if 'last_found' in globals():
         last_found_sec = time.time() - last_found
         print(f"Collected {len(collected_config.keys())} sensors, {len(changeable_select_fields.keys())} selects, last found {last_found_sec} seconds ago, last message {time.time() - last_msg} seconds ago")
-        if last_found_sec > 5:
+        if last_found_sec > 10:
             finish()
 
 mqttc.on_message = on_message
-mqttc.loop_forever()
 
+mqttc.connect( mqtt_server, int(mqtt_port), 20 )
+print("Connected to MQTT broker")
+mqttc.subscribe(subscribe_topic, 0)
+
+mqttc.loop_forever()
